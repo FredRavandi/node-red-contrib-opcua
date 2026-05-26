@@ -1118,7 +1118,23 @@ module.exports = function (RED) {
         verbose_log("Using endpoint:" + stringify(opcuaEndpoint));
       }
       console.log("#2 Create client");
-      if (!node.client) {
+      // Fix: Properly disconnect old client before creating new one to prevent connection leak
+      if (node.client) {
+        if (node.client.isReconnecting) {
+          node.client = null;
+          set_node_status_to("reconnect");
+          create_opcua_client(connect_opcua_client);
+        } else {
+          node.client.disconnect(function () {
+            node.client = null;
+            verbose_log("Old client disconnected, creating new one");
+            set_node_status_to("reconnect");
+            create_opcua_client(connect_opcua_client);
+          });
+          return; // Wait for disconnect callback
+        }
+      } else {
+        set_node_status_to("reconnect");
         create_opcua_client(connect_opcua_client);
       }
     }
@@ -2632,8 +2648,25 @@ module.exports = function (RED) {
       else {
         verbose_warn("No session to close!");
       }
-      set_node_status_to("reconnect");
-      create_opcua_client(connect_opcua_client);
+      // Fix: Properly disconnect old client before creating new one to prevent connection leak
+      if (node.client) {
+        if (node.client.isReconnecting) {
+          node.client = null;
+          set_node_status_to("reconnect");
+          create_opcua_client(connect_opcua_client);
+        } else {
+          node.client.disconnect(function () {
+            node.client = null;
+            verbose_log("Old client disconnected, creating new one");
+            set_node_status_to("reconnect");
+            create_opcua_client(connect_opcua_client);
+          });
+          return; // Wait for disconnect callback
+        }
+      } else {
+        set_node_status_to("reconnect");
+        create_opcua_client(connect_opcua_client);
+      }
     }
 
     node.on("close", async (done) => {
