@@ -1264,10 +1264,24 @@
                             minimumSamplingInterval: 500,
                             valueRank,
                             arrayDimensions: dimensions,
-                            value: // new opcua.Variant({arrayType, dataType: opcuaDataType, value: variables[variableId]}) 
+                            value: // new opcua.Variant({arrayType, dataType: opcuaDataType, value: variables[variableId]})
                             {
+                                // Build a fresh DataValue from the live variables[] dictionary on every read.
+                                // The previous implementation returned a closed-over `newValue` captured at variable
+                                // creation, which meant scalar variables were frozen at their initial value despite
+                                // the `set` callback updating `variables[variableId]`. See issue #855.
                                 timestamped_get: () => {
-                                    return newValue;
+                                    const liveVariant = (valueRank >= 2)
+                                        ? new opcua.Variant({ arrayType, dimensions, dataType: opcuaDataType, value: variables[variableId] })
+                                        : new opcua.Variant({ arrayType, dataType: opcuaDataType, value: variables[variableId] });
+                                    return new DataValue({
+                                        serverPicoseconds: 0,
+                                        serverTimestamp: new Date(),
+                                        sourcePicoseconds: 0,
+                                        sourceTimestamp: variablesTs[variableId] || ts,
+                                        statusCode: variablesStatus[variableId] || st,
+                                        value: liveVariant
+                                    });
                                 },
                                 set: function (variant) {
                                     verbose_log(chalk.yellow("Server set new variable value : ") + chalk.cyan(variables[variableId]) + chalk.yellow(" browseName: ") + chalk.cyan(ns) + ":" + chalk.cyan(browseName) + chalk.yellow(" new: ") + chalk.cyan(stringify(variant)));
@@ -1686,8 +1700,20 @@
                             });
 
                             var options = {
+                                // Build a fresh DataValue from the live variables[] dictionary on every read,
+                                // for the same reason as in addVariable above (issue #855).
                                 timestamped_get: () => {
-                                    return newValue;
+                                    return new DataValue({
+                                        serverPicoseconds: 0,
+                                        serverTimestamp: new Date(),
+                                        sourcePicoseconds: 0,
+                                        sourceTimestamp: variablesTs[variableId] || ts,
+                                        statusCode: variablesStatus[variableId] || st,
+                                        value: new opcua.Variant({
+                                            dataType: opcuaBasics.convertToString(variable.dataType.toString()),
+                                            value: variables[variableId]
+                                        })
+                                    });
                                 },
                                 set: (variant) => {
                                     // Store value
