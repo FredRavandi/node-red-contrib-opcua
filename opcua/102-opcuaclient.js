@@ -1509,17 +1509,18 @@ module.exports = function (RED) {
                       ? JSON.parse(JSON.stringify(dataValue.value.value))
                       : dataValue.value.value;
 
-                     // Use nodeId in topic, arrays are same length
-                     // Output pin 1 for each value by value
-                     // verbose_log("Output pin1, topic: " + JSON.stringify(multipleItems[i]) + " payload: " + value);
-                     let individualMsg = {
-                         topic: multipleItems[i].nodeId.toString(),
-                         payload: value,
-                         statusCode: dataValue.statusCode,
-                         serverTimestamp: serverTs,
-                         sourceTimestamp: sourceTs
-                     };
-                     node.send([individualMsg, null, null]);//node.send([{topic: multipleItems[i], payload: value, statusCode: dataValue.statusCode, serverTimestamp: serverTs, sourceTimestamp: sourceTs}, null, null]);
+                    // Use nodeId in topic, arrays are same length
+                    // Output pin 1 for each value by value
+                    // Clone msg per item: Node-RED passes the first node.send()
+                    // by reference, so mutating the shared msg in this loop
+                    // corrupts the per-item topic of already-sent messages.
+                    let outMsg = RED.util.cloneMessage(msg);
+                    outMsg.topic = multipleItems[i].nodeId.toString();
+                    outMsg.payload = value;
+                    outMsg.statusCode = dataValue.statusCode;
+                    outMsg.serverTimestamp = serverTs;
+                    outMsg.sourceTimestamp = sourceTs;
+                    node.send([outMsg, null, null]);
                   } catch (e) {
                     if (dataValue != null) {
                       node_error("Bad read, statusCode: " + (dataValue.statusCode.toString(16)));

@@ -1267,7 +1267,18 @@
                             value: // new opcua.Variant({arrayType, dataType: opcuaDataType, value: variables[variableId]}) 
                             {
                                 timestamped_get: () => {
-                                    return newValue;
+                                    return new DataValue({
+                                        serverPicoseconds: 0,
+                                        serverTimestamp: new Date(),
+                                        sourcePicoseconds: 0,
+                                        sourceTimestamp: variablesTs[variableId] || ts,
+                                        statusCode: variablesStatus[variableId] || st,
+                                        value: new opcua.Variant({
+                                            arrayType,
+                                            dataType: opcuaDataType,
+                                            value: variables[variableId]
+                                        })
+                                    });
                                 },
                                 set: function (variant) {
                                     verbose_log(chalk.yellow("Server set new variable value : ") + chalk.cyan(variables[variableId]) + chalk.yellow(" browseName: ") + chalk.cyan(ns) + ":" + chalk.cyan(browseName) + chalk.yellow(" new: ") + chalk.cyan(stringify(variant)));
@@ -1687,7 +1698,18 @@
 
                             var options = {
                                 timestamped_get: () => {
-                                    return newValue;
+                                    return new DataValue({
+                                        serverPicoseconds: 0,
+                                        serverTimestamp: new Date(),
+                                        sourcePicoseconds: 0,
+                                        sourceTimestamp: variablesTs[variableId] || ts,
+                                        statusCode: variablesStatus[variableId] || st,
+                                        value: new opcua.Variant({
+                                            arrayType,
+                                            dataType: opcuaDataType,
+                                            value: variables[variableId]
+                                        })
+                                    });
                                 },
                                 set: (variant) => {
                                     // Store value
