@@ -262,8 +262,6 @@ module.exports.get_node_status = function (statusValue) {
 
     switch (statusValue) {
 
-        case "create client":
-        case "connecting":
         case "connected":
         case "initialized":
         case "keepalive":
@@ -275,7 +273,8 @@ module.exports.get_node_status = function (statusValue) {
             fillValue = "green";
             shapeValue = "ring";
             break;
-        // issue #837
+        // issue #837 
+		case "create client":
         case "connecting":
             fillValue = "yellow";
             shapeValue = "ring";

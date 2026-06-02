@@ -375,25 +375,23 @@ module.exports = function (RED) {
         node.client.removeListener("backoff", backoff);
         node.client.removeListener("start_reconnection", reconnection);
         try {
-          if (!node.client.isReconnecting) {
-            node.client.disconnect(function () {
-              node.client = null;
-              verbose_log("Client disconnected!");
-              if (error === 0) {
-                set_node_status_to("closed");
-              }
-              else {
-                set_node_error_status_to(message, error)
-                node.error("Client disconnected & closed: " + message + " error: " + error.toString());
-              }
-            });
-          }
-          else {
+          // Always call disconnect() regardless of isReconnecting state.
+          // Skipping disconnect when isReconnecting=true leaves the TCP socket
+          // open on the PLC, causing connections to accumulate over time.
+          node.client.disconnect(function () {
             node.client = null;
-            set_node_status_to("closed");
-          }
+            verbose_log("Client disconnected!");
+            if (error === 0) {
+              set_node_status_to("closed");
+            }
+            else {
+              set_node_error_status_to(message, error)
+              node.error("Client disconnected & closed: " + message + " error: " + error.toString());
+            }
+          });
         }
         catch (err) {
+          node.client = null;
           node_error("Error on disconnect: " + stringify(err));
         }
       }
@@ -1153,9 +1151,9 @@ module.exports = function (RED) {
         node.client.removeListener("start_reconnection", reconnection);
         node.client.disconnect(function () {
           verbose_log("Client disconnected!");
+          node.client = null;
           set_node_status_to("disconnected");
         });
-        node.client = null;
       }
     }
 
@@ -1513,13 +1511,16 @@ module.exports = function (RED) {
 
                     // Use nodeId in topic, arrays are same length
                     // Output pin 1 for each value by value
-                    // verbose_log("Output pin1, topic: " + JSON.stringify(multipleItems[i]) + " payload: " + value);
-                    msg.topic = multipleItems[i].nodeId.toString();
-                    msg.payload = value;
-                    msg.statusCode = dataValue.statusCode;
-                    msg.serverTimestamp = serverTs;
-                    msg.sourceTimestamp = sourceTs;
-                    node.send([msg, null, null]);//node.send([{topic: multipleItems[i], payload: value, statusCode: dataValue.statusCode, serverTimestamp: serverTs, sourceTimestamp: sourceTs}, null, null]);
+                    // Clone msg per item: Node-RED passes the first node.send()
+                    // by reference, so mutating the shared msg in this loop
+                    // corrupts the per-item topic of already-sent messages.
+                    let outMsg = RED.util.cloneMessage(msg);
+                    outMsg.topic = multipleItems[i].nodeId.toString();
+                    outMsg.payload = value;
+                    outMsg.statusCode = dataValue.statusCode;
+                    outMsg.serverTimestamp = serverTs;
+                    outMsg.sourceTimestamp = sourceTs;
+                    node.send([outMsg, null, null]);
                   } catch (e) {
                     if (dataValue != null) {
                       node_error("Bad read, statusCode: " + (dataValue.statusCode.toString(16)));
@@ -2616,24 +2617,42 @@ module.exports = function (RED) {
       if (subscription && subscription.isActive) {
         subscription.terminate();
       }
-      // Now reconnect and use msg parameters
       subscription = null;
       monitoredItems.clear();
+
+      set_node_status_to("reconnect");
+
+      // Sequential teardown: close session first, then disconnect client,
+      // and only create the new client once the old TCP socket is fully closed.
+      // This prevents stale connections from accumulating on the PLC.
+      const doReconnect = () => {
+        if (node.client) {
+          verbose_log("Disconnecting old client before reconnect...");
+          node.client.disconnect(function () {
+            verbose_log("Old client disconnected, creating new client...");
+            node.client = null;
+            create_opcua_client(connect_opcua_client);
+          });
+        } else {
+          create_opcua_client(connect_opcua_client);
+        }
+      };
+
       if (node.session) {
         node.session.close(function (err) {
           if (err) {
             node_error("Session close error: " + err);
-          }
-          else {
+          } else {
             verbose_log("Session closed!");
           }
+          node.session = null;
+          doReconnect();
         });
-      }
-      else {
+      } else {
         verbose_warn("No session to close!");
+        node.session = null;
+        doReconnect();
       }
-      set_node_status_to("reconnect");
-      create_opcua_client(connect_opcua_client);
     }
 
     node.on("close", async (done) => {
@@ -2653,8 +2672,23 @@ module.exports = function (RED) {
       }
 
       node.session = null;
-      close_opcua_client("closed", 0);
-      done();
+
+      // Move done() inside the disconnect callback so Node-RED waits for the
+      // TCP socket to fully close before considering this node shut down.
+      // Without this, a redeploy starts a new connection while the old one is
+      // still being torn down, causing the PLC to accumulate stale connections.
+      if (node.client) {
+        node.client.removeListener("connection_reestablished", reestablish);
+        node.client.removeListener("backoff", backoff);
+        node.client.removeListener("start_reconnection", reconnection);
+        node.client.disconnect(function () {
+          node.client = null;
+          verbose_log("Client disconnected on node close");
+          done();
+        });
+      } else {
+        done();
+      }
     });
 
     node.on("error", function () {
@@ -2693,14 +2727,12 @@ module.exports = function (RED) {
         node.client.removeListener("start_reconnection", reconnection);
         node.client.disconnect(function () {
           verbose_log("Client disconnected!");
+          node.client = null;
           set_node_status_to("disconnected");
         });
         close_opcua_client("node error", 0);
-        node.client = null;
       }
     });
   }
-
   RED.nodes.registerType("OpcUa-Client", OpcUaClientNode);
-
 }

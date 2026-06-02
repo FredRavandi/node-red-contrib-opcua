@@ -1271,16 +1271,17 @@
                                 // creation, which meant scalar variables were frozen at their initial value despite
                                 // the `set` callback updating `variables[variableId]`. See issue #855.
                                 timestamped_get: () => {
-                                    const liveVariant = (valueRank >= 2)
-                                        ? new opcua.Variant({ arrayType, dimensions, dataType: opcuaDataType, value: variables[variableId] })
-                                        : new opcua.Variant({ arrayType, dataType: opcuaDataType, value: variables[variableId] });
                                     return new DataValue({
                                         serverPicoseconds: 0,
                                         serverTimestamp: new Date(),
                                         sourcePicoseconds: 0,
                                         sourceTimestamp: variablesTs[variableId] || ts,
                                         statusCode: variablesStatus[variableId] || st,
-                                        value: liveVariant
+                                        value: new opcua.Variant({
+                                            arrayType,
+                                            dataType: opcuaDataType,
+                                            value: variables[variableId]
+                                        })
                                     });
                                 },
                                 set: function (variant) {
@@ -1710,7 +1711,8 @@
                                         sourceTimestamp: variablesTs[variableId] || ts,
                                         statusCode: variablesStatus[variableId] || st,
                                         value: new opcua.Variant({
-                                            dataType: opcuaBasics.convertToString(variable.dataType.toString()),
+                                            arrayType,
+                                            dataType: opcuaDataType,
                                             value: variables[variableId]
                                         })
                                     });
