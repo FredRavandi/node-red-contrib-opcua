@@ -1264,8 +1264,12 @@
                             minimumSamplingInterval: 500,
                             valueRank,
                             arrayDimensions: dimensions,
-                            value: // new opcua.Variant({arrayType, dataType: opcuaDataType, value: variables[variableId]}) 
+                            value: // new opcua.Variant({arrayType, dataType: opcuaDataType, value: variables[variableId]})
                             {
+                                // Build a fresh DataValue from the live variables[] dictionary on every read.
+                                // The previous implementation returned a closed-over `newValue` captured at variable
+                                // creation, which meant scalar variables were frozen at their initial value despite
+                                // the `set` callback updating `variables[variableId]`. See issue #855.
                                 timestamped_get: () => {
                                     return new DataValue({
                                         serverPicoseconds: 0,
@@ -1697,6 +1701,8 @@
                             });
 
                             var options = {
+                                // Build a fresh DataValue from the live variables[] dictionary on every read,
+                                // for the same reason as in addVariable above (issue #855).
                                 timestamped_get: () => {
                                     return new DataValue({
                                         serverPicoseconds: 0,
