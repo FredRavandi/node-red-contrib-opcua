@@ -65,6 +65,8 @@ module.exports = function (RED) {
     let userIdentity = { type: opcua.UserTokenType.Anonymous }; // Initialize with Anonymous
     let connectionOption = {};
     let cmdQueue = []; // queue msgs which can currently not be handled because session is not established, yet and currentStatus is 'connecting'
+    let connecting = false; // guard: only one connect/createSession cycle may run at a time, see connect_opcua_client()
+    let connectPending = false; // a connect was requested while one was already running; re-run when it finishes
     let currentStatus = ''; // the status value set set by node.status(). Didn't find a way to read it back.
     let multipleItems = []; // Store & read multiple nodeIds
     let writeMultipleItems = []; // Store & write multiple nodeIds & values
@@ -301,6 +303,7 @@ module.exports = function (RED) {
 
     function create_opcua_client(callback) {
       node.client = null;
+      node.session = null; // a fresh client never has a session; drop any stale reference
       options = {
           securityMode: connectionOption.securityMode,
           securityPolicy: connectionOption.securityPolicy,
@@ -360,11 +363,25 @@ module.exports = function (RED) {
     }
 
     function reset_opcua_client(callback) {
+      // While a connect is running, a second reset would disconnect the client
+      // mid-handshake and open an extra session on the server once both cycles
+      // finish. The in-progress connect already covers this reset request.
+      if (connecting) {
+        verbose_warn("reset_opcua_client ignored, a connect is already in progress");
+        return;
+      }
       if (node.client) {
+        node.client.removeListener("connection_reestablished", reestablish);
+        node.client.removeListener("backoff", backoff);
+        node.client.removeListener("start_reconnection", reconnection);
         node.client.disconnect(function () {
           verbose_log("Client disconnected!");
           create_opcua_client(callback);
         });
+      } else {
+        // No client yet: still create one so the connect callback runs,
+        // otherwise the reset request would be silently lost.
+        create_opcua_client(callback);
       }
     }
 
@@ -452,7 +469,36 @@ module.exports = function (RED) {
       node.send([null, { error: error, endpoint: `${endpoint}`, status: currentStatus }, null]);
     }
 
+    // Serialize connect attempts: connect() with the configured connectionStrategy
+    // can stay in-flight for a long time (backoff retries while the server is
+    // unreachable). Without this guard, every caller in that window started its
+    // own create/connect/createSession cycle on the shared node.client, opening
+    // multiple sessions on the server and exhausting its connection limit (#441).
     async function connect_opcua_client() {
+      if (connecting) {
+        verbose_warn("Connect already in progress, deferring this connect request");
+        connectPending = true;
+        return;
+      }
+      connecting = true;
+      try {
+        await do_connect_opcua_client();
+      } finally {
+        connecting = false;
+        if (connectPending) {
+          // A reconnect/connect action arrived while connecting (e.g. it tore
+          // down the half-connected client). Run one more cycle on a clean state.
+          connectPending = false;
+          setImmediate(() => connect_opcua_client());
+        }
+      }
+    }
+
+    async function do_connect_opcua_client() {
+      if (node.session) {
+        verbose_log("Session already active, connect request skipped");
+        return;
+      }
       if (opcuaEndpoint?.login === true) {
         verbose_log(chalk.green("Using UserName & password: ") + chalk.cyan(JSON.stringify(userIdentity)));
         if (opcuaEndpoint.credentials && opcuaEndpoint['user'] && opcuaEndpoint['password']) {
@@ -518,7 +564,15 @@ module.exports = function (RED) {
       */
       verbose_log(chalk.yellow("Exact endpointUrl: ") + chalk.cyan(opcuaEndpoint?.endpoint) + chalk.yellow(" hostname: ") + chalk.cyan(os.hostname()));
       try {
-          node.client = opcua.OPCUAClient.create(options);
+          // The client was already created by create_opcua_client() with its
+          // reconnect listeners (connection_reestablished/backoff/start_reconnection)
+          // attached. Creating another OPCUAClient here would orphan that client
+          // (never disconnected, dangling listeners) and leave the connected one
+          // without any reconnect handling.
+          if (!node.client) {
+            node_error("Client was not created before connect, cannot continue");
+            return;
+          }
           node.client.clientCertificateManager = connectionOption.clientCertificateManager;
           await node.client.clientCertificateManager.initialize();
       }
@@ -702,7 +756,10 @@ module.exports = function (RED) {
         // Added statuses when msg must be put to queue
         // Added statuses when msg must be put to queue
         const statuses = ['', 'create client', 'connecting', 'reconnect'];
-        if (statuses.includes(currentStatus)) {
+        if (connecting || statuses.includes(currentStatus)) {
+          // A connect is already in progress: queue the msg for the cmdQueue
+          // drain instead of starting another reset/connect cycle, which would
+          // open an additional session on the server.
           cmdQueue.push(msg);
         } else {
           verbose_warn(`can't work without OPC UA client ${node.client} client ${node.session}`);
@@ -712,7 +769,10 @@ module.exports = function (RED) {
         return;
       }
 
-      if (!node.session.sessionId == "terminated") {
+      // Operator-precedence fix: `!node.session.sessionId == "terminated"` parsed
+      // as `(!sessionId) == "terminated"` and could never be true, so terminated
+      // sessions were never detected and recycled here.
+      if (node.session.sessionId == "terminated") {
         verbose_warn("terminated OPC UA Session");
         reset_opcua_client(connect_opcua_client);
 
@@ -1115,10 +1175,37 @@ module.exports = function (RED) {
       } else {
         verbose_log("Using endpoint:" + stringify(opcuaEndpoint));
       }
-      console.log("#2 Create client");
-      if (!node.client) {
-        create_opcua_client(connect_opcua_client);
+      // Tear down any existing session/client before creating a fresh one.
+      // Guarding creation with `if (!node.client)` made a connect action
+      // against a live client a no-op that only orphaned its listeners and
+      // leaked the open session on the server.
+      if (subscription && subscription.isActive) {
+        subscription.terminate();
       }
+      subscription = null;
+      monitoredItems.clear();
+      if (node.session) {
+        try {
+          await node.session.close();
+          verbose_log("Session closed before connect!");
+        } catch (err) {
+          node_error("Session close error: " + err);
+        }
+        node.session = null;
+      }
+      if (node.client) {
+        node.client.removeListener("connection_reestablished", reestablish);
+        node.client.removeListener("backoff", backoff);
+        node.client.removeListener("start_reconnection", reconnection);
+        try {
+          await node.client.disconnect();
+          verbose_log("Client disconnected before connect!");
+        } catch (err) {
+          node_error("Disconnect error: " + err);
+        }
+        node.client = null;
+      }
+      create_opcua_client(connect_opcua_client);
     }
 
     function disconnect_action_input(msg) {
@@ -2431,7 +2518,6 @@ module.exports = function (RED) {
       node.items = [];
 
       if (node.session) {
-        const client = opcua.OPCUAClient.create(connectionOption);
         set_node_status_to("active browsing");
 
         const nodeId = msg.topic;
